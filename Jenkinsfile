@@ -197,8 +197,8 @@ pipeline {
                     for (svc in javaServices()) {
                         def s = svc
                         jobs["Test · ${s}"] = {
-                            // Run Maven inside official Docker image — no local install needed
-                            docker.image('maven:3.9-eclipse-temurin-17').inside('-v $HOME/.m2:/root/.m2 --user root') {
+                            // withMaven auto-configures JAVA_HOME + mvn from Global Tool Configuration
+                            withMaven(maven: 'Maven-3.9', jdk: 'JDK-17') {
                                 sh """
                                     mvn clean verify \
                                         -pl ${s} -am \
@@ -212,7 +212,8 @@ pipeline {
                     for (svc in nodeServices()) {
                         def s = svc
                         jobs["Test · ${s}"] = {
-                            docker.image('node:20-alpine').inside('--user root') {
+                            // Requires NodeJS plugin + "NodeJS-20" tool configured in Jenkins
+                            nodejs(nodeJSInstallationName: 'NodeJS-20') {
                                 dir(s) {
                                     sh 'npm ci --prefer-offline'
                                     sh 'npm test -- --coverage --watchAll=false --ci'
@@ -234,14 +235,11 @@ pipeline {
                                 allowEmptyResults: true,
                                 keepLongStdio    : true
                             )
-                            // JaCoCo coverage report (requires JaCoCo plugin)
-                            step([$class                          : 'JacocoPublisher',
-                                  execPattern                     : "${svc}/target/jacoco.exec",
-                                  classPattern                    : "${svc}/target/classes",
-                                  sourcePattern                   : "${svc}/src/main/java",
-                                  exclusionPattern                : '**/*Test*,**/*IT*',
-                                  minimumLineCoverage             : env.MIN_LINE_COVERAGE,
-                                  changeBuildStatus               : false])
+                            // Archive JaCoCo XML for the coverage gate stage
+                            archiveArtifacts(
+                                artifacts        : "${svc}/target/site/jacoco/jacoco.xml",
+                                allowEmptyArchive: true
+                            )
                         }
                     }
                 }
@@ -301,7 +299,7 @@ pipeline {
                         jobs["Sonar · ${s}"] = {
                             withSonarQubeEnv('SonarQube') {
                                 withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
-                                    docker.image('maven:3.9-eclipse-temurin-17').inside('-v $HOME/.m2:/root/.m2 --user root') {
+                                    withMaven(maven: 'Maven-3.9', jdk: 'JDK-17') {
                                         sh """
                                             mvn org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
                                                 -pl ${s} -am \
