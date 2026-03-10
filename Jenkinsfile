@@ -14,13 +14,6 @@ pipeline {
     options {
         timestamps()
         disableConcurrentBuilds()
-        cache(maxCacheSize: 500, defaultBranch: 'main', caches: [
-            arbitraryFileCache(
-                path: '.m2/repository',
-                includes: '**/*',
-                cacheValidityDecidingFile: 'pom.xml'
-            )
-        ])
     }
 
     stages {
@@ -102,10 +95,18 @@ pipeline {
         stage('Build impacted modules') {
             when { expression { return env.IMPACTED_MODULES?.trim() } }
             steps {
-                script {
-                    def mods = env.IMPACTED_MODULES.split(',') as List
-                    def pl = mods.join(',')
-                    sh "mvn -B clean install -pl ${pl} -am -DskipTests"
+                cache(maxCacheSize: 500, defaultBranch: 'main', caches: [
+                    arbitraryFileCache(
+                        path: '.m2/repository',
+                        includes: '**/*',
+                        cacheValidityDecidingFile: 'pom.xml'
+                    )
+                ]) {
+                    script {
+                        def mods = env.IMPACTED_MODULES.split(',') as List
+                        def pl = mods.join(',')
+                        sh "mvn -B clean install -pl ${pl} -am -DskipTests"
+                    }
                 }
             }
         }
@@ -113,10 +114,18 @@ pipeline {
         stage('Test & Coverage Check (>70%)') {
             when { expression { return env.IMPACTED_MODULES?.trim() } }
             steps {
-                script {
-                    def mods = env.IMPACTED_MODULES.split(',') as List
-                    def pl = mods.join(',')
-                    sh "mvn -B verify -DskipITs -pl ${pl} -am"
+                cache(maxCacheSize: 500, defaultBranch: 'main', caches: [
+                    arbitraryFileCache(
+                        path: '.m2/repository',
+                        includes: '**/*',
+                        cacheValidityDecidingFile: 'pom.xml'
+                    )
+                ]) {
+                    script {
+                        def mods = env.IMPACTED_MODULES.split(',') as List
+                        def pl = mods.join(',')
+                        sh "mvn -B verify -DskipITs -pl ${pl} -am"
+                    }
                 }
             }
             post {
