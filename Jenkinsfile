@@ -3,11 +3,11 @@ pipeline {
 
     environment {
         MAVEN_OPTS = '-Dmaven.repo.local=.m2/repository'
-        JAVA_HOME = tool 'JDK21'
         DEFAULT_BASE_BRANCH = 'main'
     }
 
     tools {
+        jdk 'JDK21'
         maven 'Maven 3.9'
     }
 
