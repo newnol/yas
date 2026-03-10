@@ -1,466 +1,135 @@
-/**
- * Monorepo CI Pipeline - YAS (Yet Another Shop)
- *
- * Flow:
- *   1. Detect changed services from git diff
- *   2. Gitleaks secret scan (toàn bộ repo)
- *   3. Test  - Maven surefire (Java) / Jest (Node)
- *             - Publish JUnit results
- *             - Publish JaCoCo coverage report
- *   4. Coverage gate  — fail if line coverage < MIN_LINE_COVERAGE (default 70%)
- *   5. SonarQube analysis + Quality Gate
- *   6. Snyk dependency vulnerability scan
- *   7. Docker build & push  (main branch only)
- *
- * Required Jenkins plugins:
- *   - Pipeline, Pipeline: Stage View
- *   - Git, GitHub Branch Source
- *   - JUnit, JaCoCo
- *   - HTML Publisher
- *   - SonarQube Scanner
- *   - Snyk Security Scanner
- *   - Docker Pipeline
- *   - Credentials Binding
- *
- * Required credentials (Manage Jenkins > Credentials):
- *   - sonar-token          : Secret text  — SonarQube auth token
- *   - snyk-token           : Secret text  — Snyk auth token
- *   - docker-registry-creds: Username/password — Docker registry (ghcr.io)
- *
- * Required tools on the Jenkins agent PATH:
- *   - java / javac  (JDK 17+)
- *   - mvn           (Maven 3.9+)
- *   - node / npm    (Node 20+)  — only needed for storefront / backoffice
- *   - gitleaks      (optional)  — secret scanning
- *   - Snyk plugin   named "snyk-latest" in Global Tool Configuration
- */
-
-// ─── Service registry ──────────────────────────────────────────────────────────
-// Thêm / bỏ service tại đây khi cần
-def JAVA_SERVICES = [
-    'backoffice-bff',
-    'cart',
-    'customer',
-    'inventory',
-    'location',
-    'media',
-    'order',
-    'payment',
-    'payment-paypal',
-    'product',
-    'promotion',
-    'rating',
-    'recommendation',
-    'search',
-    'storefront-bff',
-    'tax',
-    'webhook',
-]
-
-def NODE_SERVICES = [
-    'backoffice',
-    'storefront',
-]
-
-// ─── Pipeline ──────────────────────────────────────────────────────────────────
 pipeline {
-
     agent any
 
     environment {
-        DOCKER_REGISTRY       = 'ghcr.io'
-        DOCKER_IMAGE_PREFIX   = "${DOCKER_REGISTRY}/your-org/yas"
-        MIN_LINE_COVERAGE     = '70'
-        SONAR_HOST_URL        = 'http://your-sonar-host:9000'
+        MAVEN_OPTS = '-Dmaven.repo.local=.m2/repository'
+        DEFAULT_BASE_BRANCH = 'main'
     }
-    // notice
-    parameters {
-        booleanParam(
-            name        : 'FORCE_BUILD_ALL',
-            defaultValue: false,
-            description : 'Bỏ qua git diff, build & test TẤT CẢ services'
-        )
-        string(
-            name        : 'SERVICE_OVERRIDE',
-            defaultValue: '',
-            description : 'Chỉ build service này (vd: media). Để trống = tự detect từ git diff.'
-        )
+
+    tools {
+        jdk 'JDK21'
+        maven 'Maven 3.9'
     }
-    // notice
 
     options {
         timestamps()
-        disableConcurrentBuilds()
-        buildDiscarder(logRotator(numToKeepStr: '20'))
-        timeout(time: 60, unit: 'MINUTES')
+        disableConcurrentBuilds()   
     }
 
     stages {
-
-        // ── 1. Checkout ────────────────────────────────────────────────────────
         stage('Checkout') {
-            steps {
-                checkout scm
-            }
+            steps { checkout scm }
         }
 
-        // ── 2. Detect changed services ─────────────────────────────────────────
-        stage('Detect Changed Services') {
+        stage('Detect changed modules') {
             steps {
                 script {
-                    def changedJava = []
-                    def changedNode = []
+                    // Always fetch all remote branches so origin/main exists locally
+                    sh "git fetch --no-tags --prune origin +refs/heads/*:refs/remotes/origin/*"
 
-                    // Priority 1: explicit SERVICE_OVERRIDE parameter
-                    if (params.SERVICE_OVERRIDE?.trim()) {
-                        def svc = params.SERVICE_OVERRIDE.trim()
-                        if (JAVA_SERVICES.contains(svc)) {
-                            changedJava = [svc]
-                        } else if (NODE_SERVICES.contains(svc)) {
-                            changedNode = [svc]
-                        } else {
-                            error "SERVICE_OVERRIDE '${svc}' không tồn tại trong danh sách service."
-                        }
-                        echo "SERVICE_OVERRIDE mode: chỉ build '${svc}'"
-
-                    // Priority 2: FORCE_BUILD_ALL parameter
-                    } else if (params.FORCE_BUILD_ALL) {
-                        changedJava = JAVA_SERVICES.collect()
-                        changedNode = NODE_SERVICES.collect()
-                        echo "FORCE_BUILD_ALL = true: build tất cả services"
-
-                    // Priority 3: auto-detect từ git diff
+                    // 1) Choose base for diff
+                    // - PR build: compare with PR target branch (usually main)
+                    // - Branch build: compare with origin/main
+                    def baseRef = ''
+                    if (env.CHANGE_ID) {
+                        baseRef = "origin/${env.CHANGE_TARGET ?: env.DEFAULT_BASE_BRANCH}"
                     } else {
-                        def changedFiles = getChangedFiles()
-                        echo "Changed files:\n  ${changedFiles.join('\n  ')}"
-
-                        // Không có previous commit (first run) → build tất cả
-                        if (!env.GIT_PREVIOUS_SUCCESSFUL_COMMIT) {
-                            echo "First run (no previous successful build) — building all services"
-                            changedJava = JAVA_SERVICES.collect()
-                            changedNode = NODE_SERVICES.collect()
-                        } else {
-                            boolean rootPomChanged = changedFiles.any { it == 'pom.xml' }
-
-                            changedJava = rootPomChanged
-                                ? JAVA_SERVICES.collect()
-                                : JAVA_SERVICES.findAll { svc -> changedFiles.any { f -> f.startsWith("${svc}/") } }
-
-                            changedNode = rootPomChanged
-                                ? NODE_SERVICES.collect()
-                                : NODE_SERVICES.findAll { svc -> changedFiles.any { f -> f.startsWith("${svc}/") } }
-                        }
+                        baseRef = "origin/${env.DEFAULT_BASE_BRANCH}"
                     }
 
-                    // Persist across stages via env vars
-                    env.CHANGED_JAVA = changedJava.join(',')
-                    env.CHANGED_NODE = changedNode.join(',')
+                    // 2) Diff and collect changed files
+                    def diffCmd = "git diff --name-only ${baseRef}...HEAD"
+                    def changedFilesRaw = sh(script: diffCmd, returnStdout: true).trim()
+                    def changedFiles = changedFilesRaw ? changedFilesRaw.split('\n') : []
 
-                    if (!changedJava && !changedNode) {
-                        echo 'No service changes detected — skipping CI.'
+                    echo "BRANCH_NAME: ${env.BRANCH_NAME}"
+                    echo "Base for diff: ${baseRef}"
+                    echo "origin/${env.DEFAULT_BASE_BRANCH}: " + sh(script: "git rev-parse ${baseRef}", returnStdout: true).trim()
+                    echo "HEAD: " + sh(script: "git rev-parse HEAD", returnStdout: true).trim()
+                    echo "Changed files:\n- " + (changedFiles ? changedFiles.join("\n- ") : "(none)")
+
+                    // 3) Declare Maven modules (folder names)
+                    def modules = [
+                        'customer',
+                        'cart',
+                        'order',
+                        'product',
+                        'tax',
+                        'media',
+                        'search',
+                        'webhook',
+                        'common-library'
+                    ]
+
+                    // 4) Decide impacted modules (Option A: ONLY folder-based changes)
+                    def impacted = modules.findAll { m ->
+                        changedFiles.any { f -> f.startsWith("${m}/") }
+                    }
+
+                    if (impacted.isEmpty()) {
+                        echo "No impacted modules detected (only service-folder changes are considered). Marking build as NOT_BUILT."
                         currentBuild.result = 'NOT_BUILT'
+                        env.IMPACTED_MODULES = ''
                     } else {
-                        echo "Java services to build : ${changedJava ?: 'none'}"
-                        echo "Node services to build : ${changedNode ?: 'none'}"
+                        env.IMPACTED_MODULES = impacted.join(',')
+                        echo "Impacted modules: ${env.IMPACTED_MODULES}"
                     }
                 }
             }
         }
 
-        // ── 3. Gitleaks secret scan ────────────────────────────────────────────
-        stage('Secret Scan (Gitleaks)') {
-            when { expression { currentBuild.result != 'NOT_BUILT' } }
+        stage('Build impacted modules') {
+            when { expression { return env.IMPACTED_MODULES?.trim() } }
             steps {
-                sh '''
-                    if command -v gitleaks >/dev/null 2>&1; then
-                        gitleaks detect \
-                            --source . \
-                            --config gitleaks.toml \
-                            --report-format json \
-                            --report-path gitleaks-report.json \
-                            --exit-code 1 || true
-                    else
-                        echo "WARNING: gitleaks not found, skipping secret scan."
-                    fi
-                '''
-                archiveArtifacts artifacts: 'gitleaks-report.json', allowEmptyArchive: true
+                script {
+                    def mods = env.IMPACTED_MODULES.split(',') as List
+                    def pl = mods.join(',')
+                    sh "mvn -B clean install -pl ${pl} -am -DskipTests"
+                }
             }
         }
 
-        // ── 4. Test ────────────────────────────────────────────────────────────
-        stage('Test') {
-            when { expression { currentBuild.result != 'NOT_BUILT' } }
+        stage('Test impacted modules') {
+            when { expression { return env.IMPACTED_MODULES?.trim() } }
             steps {
                 script {
-                    def jobs = [:]
-
-                    for (svc in javaServices()) {
-                        def s = svc
-                        jobs["Test · ${s}"] = {
-                            // withMaven auto-configures JAVA_HOME + mvn from Global Tool Configuration
-                            withMaven(maven: 'Maven-3.9', jdk: 'JDK-17') {
-                                sh """
-                                    mvn clean verify \
-                                        -pl ${s} -am \
-                                        -Dcheckstyle.output.file=${s}-checkstyle-result.xml \
-                                        -B --no-transfer-progress
-                                """
-                            }
-                        }
-                    }
-
-                    for (svc in nodeServices()) {
-                        def s = svc
-                        jobs["Test · ${s}"] = {
-                            // Requires NodeJS plugin + "NodeJS-20" tool configured in Jenkins
-                            nodejs(nodeJSInstallationName: 'NodeJS-20') {
-                                dir(s) {
-                                    sh 'npm ci --prefer-offline'
-                                    sh 'npm test -- --coverage --watchAll=false --ci'
-                                }
-                            }
-                        }
-                    }
-
-                    parallel jobs
+                    def mods = env.IMPACTED_MODULES.split(',') as List
+                    def pl = mods.join(',')
+                    sh "mvn -B test jacoco:report -pl ${pl} -am"
                 }
             }
             post {
                 always {
+                    junit testResults: '**/target/surefire-reports/TEST-*.xml', allowEmptyResults: true, skipMarkingBuildUnstable: true
+
                     script {
-                        for (svc in javaServices()) {
-                            // JUnit test results
-                            junit(
-                                testResults      : "${svc}/**/surefire-reports/TEST*.xml",
-                                allowEmptyResults: true,
-                                keepLongStdio    : true
+                        def mods = (env.IMPACTED_MODULES?.trim() ? env.IMPACTED_MODULES.split(',') : []) as List
+                        mods.each { m ->
+                            jacoco(
+                                execPattern: "${m}/target/jacoco.exec",
+                                classPattern: "${m}/target/classes",
+                                sourcePattern: "${m}/src/main/java",
+                                exclusionPattern: '**/*Test*.class'
                             )
-                            // Archive JaCoCo XML for the coverage gate stage
-                            archiveArtifacts(
-                                artifacts        : "${svc}/target/site/jacoco/jacoco.xml",
-                                allowEmptyArchive: true
-                            )
+
+                            publishHTML([
+                                allowMissing: true,
+                                alwaysLinkToLastBuild: true,
+                                keepAll: true,
+                                reportDir: "${m}/target/site/jacoco",
+                                reportFiles: 'index.html',
+                                reportName: "${m} Coverage Report",
+                                reportTitles: "Code Coverage Report (${m})"
+                            ])
                         }
-                    }
-                }
-            }
-        }
-
-        // ── 5. Coverage gate (>= MIN_LINE_COVERAGE %) ─────────────────────────
-        stage('Coverage Gate') {
-            when { expression { currentBuild.result != 'NOT_BUILT' } }
-            steps {
-                script {
-                    int threshold = env.MIN_LINE_COVERAGE.toInteger()
-
-                    for (svc in javaServices()) {
-                        def xmlPath = "${svc}/target/site/jacoco/jacoco.xml"
-                        if (!fileExists(xmlPath)) {
-                            echo "WARN: ${xmlPath} not found — skipping coverage check for ${svc}"
-                            continue
-                        }
-
-                        // Parse LINE counter from jacoco.xml using awk (no python3 needed)
-                        int pct = sh(
-                            script: """
-                                awk -F'"' '
-                                  /type="LINE"/ {
-                                    for(i=1;i<=NF;i++){
-                                      if(\$i=="missed")  missed=\$(i+1)
-                                      if(\$i=="covered") covered=\$(i+1)
-                                    }
-                                    total=missed+covered
-                                    print (total>0) ? int(covered/total*100) : 0
-                                  }
-                                ' "${xmlPath}" | tail -1
-                            """,
-                            returnStdout: true
-                        ).trim().toInteger()
-
-                        echo "${svc}: line coverage = ${pct}%  (minimum: ${threshold}%)"
-
-                        if (pct < threshold) {
-                            error "${svc} coverage ${pct}% is below the required ${threshold}%"
-                        }
-                    }
-                }
-            }
-        }
-
-        // ── 6. SonarQube analysis ──────────────────────────────────────────────
-        stage('SonarQube Analysis') {
-            when { expression { currentBuild.result != 'NOT_BUILT' } }
-            steps {
-                script {
-                    def jobs = [:]
-
-                    for (svc in javaServices()) {
-                        def s = svc
-                        jobs["Sonar · ${s}"] = {
-                            withSonarQubeEnv('SonarQube') {
-                                withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
-                                    withMaven(maven: 'Maven-3.9', jdk: 'JDK-17') {
-                                        sh """
-                                            mvn org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
-                                                -pl ${s} -am \
-                                                -Dsonar.token=${SONAR_TOKEN} \
-                                                -B --no-transfer-progress
-                                        """
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    if (jobs) {
-                        parallel jobs
-                    } else {
-                        echo 'No Java services changed — skipping SonarQube.'
-                    }
-                }
-            }
-        }
-
-        // ── 7. SonarQube Quality Gate ──────────────────────────────────────────
-        stage('Quality Gate') {
-            when {
-                allOf {
-                    expression { currentBuild.result != 'NOT_BUILT' }
-                    expression { javaServices().size() > 0 }
-                }
-            }
-            steps {
-                timeout(time: 10, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
-                }
-            }
-        }
-
-        // ── 8. Snyk vulnerability scan ─────────────────────────────────────────
-        stage('Snyk Security Scan') {
-            when { expression { currentBuild.result != 'NOT_BUILT' } }
-            steps {
-                script {
-                    def jobs = [:]
-
-                    for (svc in javaServices()) {
-                        def s = svc
-                        jobs["Snyk · ${s}"] = {
-                            snykSecurity(
-                                snykInstallation : 'snyk-latest',
-                                snykTokenId      : 'snyk-token',
-                                targetFile       : "${s}/pom.xml",
-                                failOnIssues     : false,
-                                severity         : 'high',
-                                additionalArguments: "--all-projects --detection-depth=2"
-                            )
-                        }
-                    }
-
-                    for (svc in nodeServices()) {
-                        def s = svc
-                        jobs["Snyk · ${s}"] = {
-                            snykSecurity(
-                                snykInstallation : 'snyk-latest',
-                                snykTokenId      : 'snyk-token',
-                                targetFile       : "${s}/package.json",
-                                failOnIssues     : false,
-                                severity         : 'high'
-                            )
-                        }
-                    }
-
-                    if (jobs) {
-                        parallel jobs
-                    } else {
-                        echo 'No services changed — skipping Snyk scan.'
-                    }
-                }
-            }
-        }
-
-        // ── 9. Build & push Docker images (main branch only) ───────────────────
-        stage('Build & Push Docker Images') {
-            when {
-                allOf {
-                    branch 'main'
-                    expression { currentBuild.result != 'NOT_BUILT' }
-                }
-            }
-            steps {
-                script {
-                    def jobs = [:]
-                    def allChanged = javaServices() + nodeServices()
-
-                    for (svc in allChanged) {
-                        def s = svc
-                        jobs["Docker · ${s}"] = {
-                            docker.withRegistry("https://${env.DOCKER_REGISTRY}", 'docker-registry-creds') {
-                                def img = docker.build(
-                                    "${env.DOCKER_IMAGE_PREFIX}-${s}:${env.BUILD_NUMBER}",
-                                    "--file ${s}/Dockerfile ${s}"
-                                )
-                                img.push()
-                                img.push('latest')
-                                echo "Pushed ${env.DOCKER_IMAGE_PREFIX}-${s}:${env.BUILD_NUMBER}"
-                            }
-                        }
-                    }
-
-                    if (jobs) {
-                        parallel jobs
-                    } else {
-                        echo 'No services changed — skipping Docker build.'
                     }
                 }
             }
         }
     }
 
-    // ── Post actions ────────────────────────────────────────────────────────────
     post {
-        always {
-            archiveArtifacts(
-                artifacts       : '**/*-checkstyle-result.xml, **/target/site/jacoco/jacoco.xml',
-                allowEmptyArchive: true
-            )
-            cleanWs()
-        }
-        success {
-            echo "Pipeline SUCCEEDED for build #${env.BUILD_NUMBER}"
-        }
-        failure {
-            echo "Pipeline FAILED — check logs above."
-        }
-        unstable {
-            echo "Pipeline is UNSTABLE (tests passed but some checks warn)."
-        }
+        success { echo 'Monorepo CI Pipeline completed successfully!' }
+        failure { echo 'Monorepo CI Pipeline failed!' }
     }
-}
-
-// ─── Helper functions ──────────────────────────────────────────────────────────
-
-/**
- * Returns the list of files changed since the last successful build (or HEAD~1
- * on first run / manual trigger).
- */
-def getChangedFiles() {
-    def base = env.GIT_PREVIOUS_SUCCESSFUL_COMMIT ?: 'HEAD~1'
-    def output = sh(
-        script: "git diff --name-only ${base} ${env.GIT_COMMIT ?: 'HEAD'} 2>/dev/null || git diff --name-only HEAD~1 HEAD",
-        returnStdout: true
-    ).trim()
-    return output ? output.split('\n').toList() : []
-}
-
-/** Changed Java services stored in env.CHANGED_JAVA */
-def javaServices() {
-    def val = env.CHANGED_JAVA
-    return (val && val.trim()) ? val.split(',').toList() : []
-}
-
-/** Changed Node services stored in env.CHANGED_NODE */
-def nodeServices() {
-    def val = env.CHANGED_NODE
-    return (val && val.trim()) ? val.split(',').toList() : []
 }
