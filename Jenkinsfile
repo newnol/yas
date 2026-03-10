@@ -24,10 +24,13 @@ pipeline {
         stage('Gitleaks - Secret Scanning') {
             steps {
                 sh '''
-                    docker run --rm \
-                        -v "$(pwd):/repo" \
-                        -w /repo \
-                        zricethezav/gitleaks:latest detect \
+                    GITLEAKS_VERSION="8.22.1"
+                    if ! command -v gitleaks &> /dev/null; then
+                        curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
+                            | tar xz -C /tmp/
+                    fi
+                    GITLEAKS_CMD=$(command -v gitleaks || echo "/tmp/gitleaks")
+                    ${GITLEAKS_CMD} detect \
                         --source . \
                         --report-format json \
                         --report-path gitleaks-report.json \
