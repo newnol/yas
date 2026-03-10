@@ -197,21 +197,26 @@ pipeline {
                     for (svc in javaServices()) {
                         def s = svc
                         jobs["Test · ${s}"] = {
-                            sh """
-                                mvn clean verify \
-                                    -pl ${s} -am \
-                                    -Dcheckstyle.output.file=${s}-checkstyle-result.xml \
-                                    -B --no-transfer-progress
-                            """
+                            // Run Maven inside official Docker image — no local install needed
+                            docker.image('maven:3.9-eclipse-temurin-17').inside('-v $HOME/.m2:/root/.m2 --user root') {
+                                sh """
+                                    mvn clean verify \
+                                        -pl ${s} -am \
+                                        -Dcheckstyle.output.file=${s}-checkstyle-result.xml \
+                                        -B --no-transfer-progress
+                                """
+                            }
                         }
                     }
 
                     for (svc in nodeServices()) {
                         def s = svc
                         jobs["Test · ${s}"] = {
-                            dir(s) {
-                                sh 'npm ci --prefer-offline'
-                                sh 'npm test -- --coverage --watchAll=false --ci'
+                            docker.image('node:20-alpine').inside('--user root') {
+                                dir(s) {
+                                    sh 'npm ci --prefer-offline'
+                                    sh 'npm test -- --coverage --watchAll=false --ci'
+                                }
                             }
                         }
                     }
@@ -222,34 +227,21 @@ pipeline {
             post {
                 always {
                     script {
-                        // Publish JUnit results for every changed Java service
                         for (svc in javaServices()) {
+                            // JUnit test results
                             junit(
-                                testResults          : "${svc}/**/surefire-reports/TEST*.xml",
-                                allowEmptyResults    : true,
-                                keepLongStdio        : true
+                                testResults      : "${svc}/**/surefire-reports/TEST*.xml",
+                                allowEmptyResults: true,
+                                keepLongStdio    : true
                             )
-                            // JaCoCo HTML report
-                            publishHTML(target: [
-                                allowMissing         : true,
-                                alwaysLinkToLastBuild: false,
-                                keepAll              : true,
-                                reportDir            : "${svc}/target/site/jacoco",
-                                reportFiles          : 'index.html',
-                                reportName           : "${svc} Coverage Report"
-                            ])
-                        }
-
-                        // Publish Jest/lcov results for Node services
-                        for (svc in nodeServices()) {
-                            publishHTML(target: [
-                                allowMissing         : true,
-                                alwaysLinkToLastBuild: false,
-                                keepAll              : true,
-                                reportDir            : "${svc}/coverage/lcov-report",
-                                reportFiles          : 'index.html',
-                                reportName           : "${svc} Coverage Report"
-                            ])
+                            // JaCoCo coverage report (requires JaCoCo plugin)
+                            step([$class                          : 'JacocoPublisher',
+                                  execPattern                     : "${svc}/target/jacoco.exec",
+                                  classPattern                    : "${svc}/target/classes",
+                                  sourcePattern                   : "${svc}/src/main/java",
+                                  exclusionPattern                : '**/*Test*,**/*IT*',
+                                  minimumLineCoverage             : env.MIN_LINE_COVERAGE,
+                                  changeBuildStatus               : false])
                         }
                     }
                 }
@@ -270,23 +262,19 @@ pipeline {
                             continue
                         }
 
+                        // Parse LINE counter from jacoco.xml using awk (no python3 needed)
                         int pct = sh(
                             script: """
-                                python3 - <<'EOF'
-import xml.etree.ElementTree as ET
-import sys
-
-tree = ET.parse('${xmlPath}')
-root = tree.getroot()
-for counter in root.findall('counter'):
-    if counter.get('type') == 'LINE':
-        missed  = int(counter.get('missed', 0))
-        covered = int(counter.get('covered', 0))
-        total   = missed + covered
-        print(int((covered / total * 100) if total > 0 else 0))
-        sys.exit(0)
-print(0)
-EOF
+                                awk -F'"' '
+                                  /type="LINE"/ {
+                                    for(i=1;i<=NF;i++){
+                                      if(\$i=="missed")  missed=\$(i+1)
+                                      if(\$i=="covered") covered=\$(i+1)
+                                    }
+                                    total=missed+covered
+                                    print (total>0) ? int(covered/total*100) : 0
+                                  }
+                                ' "${xmlPath}" | tail -1
                             """,
                             returnStdout: true
                         ).trim().toInteger()
@@ -313,12 +301,14 @@ EOF
                         jobs["Sonar · ${s}"] = {
                             withSonarQubeEnv('SonarQube') {
                                 withCredentials([string(credentialsId: 'sonar-token', variable: 'SONAR_TOKEN')]) {
-                                    sh """
-                                        mvn org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
-                                            -pl ${s} -am \
-                                            -Dsonar.token=${SONAR_TOKEN} \
-                                            -B --no-transfer-progress
-                                    """
+                                    docker.image('maven:3.9-eclipse-temurin-17').inside('-v $HOME/.m2:/root/.m2 --user root') {
+                                        sh """
+                                            mvn org.sonarsource.scanner.maven:sonar-maven-plugin:sonar \
+                                                -pl ${s} -am \
+                                                -Dsonar.token=${SONAR_TOKEN} \
+                                                -B --no-transfer-progress
+                                        """
+                                    }
                                 }
                             }
                         }
