@@ -73,7 +73,7 @@ pipeline {
         MIN_LINE_COVERAGE     = '70'
         SONAR_HOST_URL        = 'http://your-sonar-host:9000'
     }
-
+    // notice
     parameters {
         booleanParam(
             name        : 'FORCE_BUILD_ALL',
@@ -86,6 +86,7 @@ pipeline {
             description : 'Chỉ build service này (vd: media). Để trống = tự detect từ git diff.'
         )
     }
+    // notice
 
     options {
         timestamps()
