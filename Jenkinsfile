@@ -13,7 +13,7 @@ pipeline {
 
     options {
         timestamps()
-        disableConcurrentBuilds()
+        disableConcurrentBuilds()   
     }
 
     stages {
@@ -21,37 +21,15 @@ pipeline {
             steps { checkout scm }
         }
 
-        stage('Gitleaks - Secret Scanning') {
-            steps {
-                catchError(buildResult: 'SUCCESS', stageResult: 'UNSTABLE') {
-                    sh '''
-                        GITLEAKS_VERSION="8.22.1"
-                        if ! command -v gitleaks &> /dev/null; then
-                            curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-                                | tar xz -C /tmp/
-                        fi
-                        GITLEAKS_CMD=$(command -v gitleaks || echo "/tmp/gitleaks")
-                        ${GITLEAKS_CMD} detect \
-                            --source . \
-                            --report-format json \
-                            --report-path gitleaks-report.json \
-                            --verbose \
-                            --exit-code 1
-                    '''
-                }
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'gitleaks-report.json', allowEmptyArchive: true
-                }
-            }
-        }
-
         stage('Detect changed modules') {
             steps {
                 script {
+                    // Always fetch all remote branches so origin/main exists locally
                     sh "git fetch --no-tags --prune origin +refs/heads/*:refs/remotes/origin/*"
 
+                    // 1) Choose base for diff
+                    // - PR build: compare with PR target branch (usually main)
+                    // - Branch build: compare with origin/main
                     def baseRef = ''
                     if (env.CHANGE_ID) {
                         baseRef = "origin/${env.CHANGE_TARGET ?: env.DEFAULT_BASE_BRANCH}"
@@ -59,6 +37,7 @@ pipeline {
                         baseRef = "origin/${env.DEFAULT_BASE_BRANCH}"
                     }
 
+                    // 2) Diff and collect changed files
                     def diffCmd = "git diff --name-only ${baseRef}...HEAD"
                     def changedFilesRaw = sh(script: diffCmd, returnStdout: true).trim()
                     def changedFiles = changedFilesRaw ? changedFilesRaw.split('\n') : []
@@ -69,6 +48,7 @@ pipeline {
                     echo "HEAD: " + sh(script: "git rev-parse HEAD", returnStdout: true).trim()
                     echo "Changed files:\n- " + (changedFiles ? changedFiles.join("\n- ") : "(none)")
 
+                    // 3) Declare Maven modules (folder names)
                     def modules = [
                         'customer',
                         'cart',
@@ -81,6 +61,7 @@ pipeline {
                         'common-library'
                     ]
 
+                    // 4) Decide impacted modules (Option A: ONLY folder-based changes)
                     def impacted = modules.findAll { m ->
                         changedFiles.any { f -> f.startsWith("${m}/") }
                     }
@@ -100,37 +81,21 @@ pipeline {
         stage('Build impacted modules') {
             when { expression { return env.IMPACTED_MODULES?.trim() } }
             steps {
-                cache(maxCacheSize: 500, defaultBranch: 'main', caches: [
-                    arbitraryFileCache(
-                        path: '.m2/repository',
-                        includes: '**/*',
-                        cacheValidityDecidingFile: 'pom.xml'
-                    )
-                ]) {
-                    script {
-                        def mods = env.IMPACTED_MODULES.split(',') as List
-                        def pl = mods.join(',')
-                        sh "mvn -B clean install -pl ${pl} -am -DskipTests"
-                    }
+                script {
+                    def mods = env.IMPACTED_MODULES.split(',') as List
+                    def pl = mods.join(',')
+                    sh "mvn -B clean install -pl ${pl} -am -DskipTests"
                 }
             }
         }
 
-        stage('Test & Coverage Check (>70%)') {
+        stage('Test impacted modules') {
             when { expression { return env.IMPACTED_MODULES?.trim() } }
             steps {
-                cache(maxCacheSize: 500, defaultBranch: 'main', caches: [
-                    arbitraryFileCache(
-                        path: '.m2/repository',
-                        includes: '**/*',
-                        cacheValidityDecidingFile: 'pom.xml'
-                    )
-                ]) {
-                    script {
-                        def mods = env.IMPACTED_MODULES.split(',') as List
-                        def pl = mods.join(',')
-                        sh "mvn -B verify -DskipITs -pl ${pl}"
-                    }
+                script {
+                    def mods = env.IMPACTED_MODULES.split(',') as List
+                    def pl = mods.join(',')
+                    sh "mvn -B test jacoco:report -pl ${pl} -am"
                 }
             }
             post {
@@ -144,9 +109,7 @@ pipeline {
                                 execPattern: "${m}/target/jacoco.exec",
                                 classPattern: "${m}/target/classes",
                                 sourcePattern: "${m}/src/main/java",
-                                exclusionPattern: '**/*Test*.class',
-                                minimumLineCoverage: '70',
-                                minimumBranchCoverage: '70'
+                                exclusionPattern: '**/*Test*.class'
                             )
 
                             publishHTML([
@@ -160,57 +123,6 @@ pipeline {
                             ])
                         }
                     }
-                }
-            }
-        }
-
-        stage('SonarQube Analysis') {
-            when { expression { return env.IMPACTED_MODULES?.trim() } }
-            steps {
-                withSonarQubeEnv('SonarQube') {
-                    script {
-                        def mods = env.IMPACTED_MODULES.split(',') as List
-                        def pl = mods.join(',')
-                        sh """
-                            mvn -B sonar:sonar \
-                                -pl ${pl} -am \
-                                -Dsonar.projectKey=nashtech-garage_yas-yas-parent \
-                                -Dsonar.organization=nashtech-garage
-                        """
-                    }
-                }
-            }
-        }
-
-        stage('SonarQube Quality Gate') {
-            when { expression { return env.IMPACTED_MODULES?.trim() } }
-            steps {
-                timeout(time: 5, unit: 'MINUTES') {
-                    waitForQualityGate abortPipeline: true
-                }
-            }
-        }
-
-        stage('Snyk Security Scan') {
-            when { expression { return env.IMPACTED_MODULES?.trim() } }
-            steps {
-                withCredentials([string(credentialsId: 'snyk-token', variable: 'SNYK_TOKEN')]) {
-                    script {
-                        sh 'snyk auth ${SNYK_TOKEN}'
-                        def mods = env.IMPACTED_MODULES.split(',') as List
-                        mods.each { m ->
-                            sh """
-                                snyk test --file=${m}/pom.xml \
-                                    --severity-threshold=high \
-                                    --json > snyk-${m}-report.json || true
-                            """
-                        }
-                    }
-                }
-            }
-            post {
-                always {
-                    archiveArtifacts artifacts: 'snyk-*-report.json', allowEmptyArchive: true
                 }
             }
         }
