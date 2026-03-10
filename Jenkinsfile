@@ -74,6 +74,19 @@ pipeline {
         SONAR_HOST_URL        = 'http://your-sonar-host:9000'
     }
 
+    parameters {
+        booleanParam(
+            name        : 'FORCE_BUILD_ALL',
+            defaultValue: false,
+            description : 'Bỏ qua git diff, build & test TẤT CẢ services'
+        )
+        string(
+            name        : 'SERVICE_OVERRIDE',
+            defaultValue: '',
+            description : 'Chỉ build service này (vd: media). Để trống = tự detect từ git diff.'
+        )
+    }
+
     options {
         timestamps()
         disableConcurrentBuilds()
@@ -94,18 +107,49 @@ pipeline {
         stage('Detect Changed Services') {
             steps {
                 script {
-                    def changedFiles = getChangedFiles()
-                    echo "Changed files:\n  ${changedFiles.join('\n  ')}"
+                    def changedJava = []
+                    def changedNode = []
 
-                    boolean rootPomChanged = changedFiles.any { it == 'pom.xml' }
+                    // Priority 1: explicit SERVICE_OVERRIDE parameter
+                    if (params.SERVICE_OVERRIDE?.trim()) {
+                        def svc = params.SERVICE_OVERRIDE.trim()
+                        if (JAVA_SERVICES.contains(svc)) {
+                            changedJava = [svc]
+                        } else if (NODE_SERVICES.contains(svc)) {
+                            changedNode = [svc]
+                        } else {
+                            error "SERVICE_OVERRIDE '${svc}' không tồn tại trong danh sách service."
+                        }
+                        echo "SERVICE_OVERRIDE mode: chỉ build '${svc}'"
 
-                    def changedJava = rootPomChanged
-                        ? JAVA_SERVICES.collect()
-                        : JAVA_SERVICES.findAll { svc -> changedFiles.any { f -> f.startsWith("${svc}/") } }
+                    // Priority 2: FORCE_BUILD_ALL parameter
+                    } else if (params.FORCE_BUILD_ALL) {
+                        changedJava = JAVA_SERVICES.collect()
+                        changedNode = NODE_SERVICES.collect()
+                        echo "FORCE_BUILD_ALL = true: build tất cả services"
 
-                    def changedNode = rootPomChanged
-                        ? NODE_SERVICES.collect()
-                        : NODE_SERVICES.findAll { svc -> changedFiles.any { f -> f.startsWith("${svc}/") } }
+                    // Priority 3: auto-detect từ git diff
+                    } else {
+                        def changedFiles = getChangedFiles()
+                        echo "Changed files:\n  ${changedFiles.join('\n  ')}"
+
+                        // Không có previous commit (first run) → build tất cả
+                        if (!env.GIT_PREVIOUS_SUCCESSFUL_COMMIT) {
+                            echo "First run (no previous successful build) — building all services"
+                            changedJava = JAVA_SERVICES.collect()
+                            changedNode = NODE_SERVICES.collect()
+                        } else {
+                            boolean rootPomChanged = changedFiles.any { it == 'pom.xml' }
+
+                            changedJava = rootPomChanged
+                                ? JAVA_SERVICES.collect()
+                                : JAVA_SERVICES.findAll { svc -> changedFiles.any { f -> f.startsWith("${svc}/") } }
+
+                            changedNode = rootPomChanged
+                                ? NODE_SERVICES.collect()
+                                : NODE_SERVICES.findAll { svc -> changedFiles.any { f -> f.startsWith("${svc}/") } }
+                        }
+                    }
 
                     // Persist across stages via env vars
                     env.CHANGED_JAVA = changedJava.join(',')
