@@ -81,10 +81,16 @@ pipeline {
         stage('Build impacted modules') {
             when { expression { return env.IMPACTED_MODULES?.trim() } }
             steps {
-                script {
-                    def mods = env.IMPACTED_MODULES.split(',') as List
-                    def pl = mods.join(',')
-                    sh "mvn -B clean install -pl ${pl} -am -DskipTests"
+                // Cấu hình cache thư mục .m2/repository
+                cache(maxCacheSize: 2000, caches: [
+                    maven(defaultCacheLocation: '.m2/repository')
+                ]) {
+                    script {
+                        def mods = env.IMPACTED_MODULES.split(',') as List
+                        def pl = mods.join(',')
+                        // Thêm tham số -Dmaven.repo.local để trỏ Maven vào thư mục cache trong workspace
+                        sh "mvn -B clean install -pl ${pl} -am -DskipTests -Dmaven.repo.local=.m2/repository"
+                    }
                 }
             }
         }
