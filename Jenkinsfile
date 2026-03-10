@@ -27,11 +27,12 @@
  *   - snyk-token           : Secret text  — Snyk auth token
  *   - docker-registry-creds: Username/password — Docker registry (ghcr.io)
  *
- * Required tools (Manage Jenkins > Global Tool Configuration):
- *   - JDK  named "JDK-17"
- *   - Maven named "Maven-3.9"
- *   - Node  named "NodeJS-20"
- *   - Snyk  named "snyk-latest"
+ * Required tools on the Jenkins agent PATH:
+ *   - java / javac  (JDK 17+)
+ *   - mvn           (Maven 3.9+)
+ *   - node / npm    (Node 20+)  — only needed for storefront / backoffice
+ *   - gitleaks      (optional)  — secret scanning
+ *   - Snyk plugin   named "snyk-latest" in Global Tool Configuration
  */
 
 // ─── Service registry ──────────────────────────────────────────────────────────
@@ -65,12 +66,6 @@ def NODE_SERVICES = [
 pipeline {
 
     agent any
-
-    tools {
-        jdk   'JDK-17'
-        maven 'Maven-3.9'
-        nodejs 'NodeJS-20'
-    }
 
     environment {
         DOCKER_REGISTRY       = 'ghcr.io'
