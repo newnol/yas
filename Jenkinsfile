@@ -194,7 +194,7 @@ pipeline {
                 script {
                     def jobs = [:]
 
-                    for (svc in splitEnv('CHANGED_JAVA')) {
+                    for (svc in javaServices()) {
                         def s = svc
                         jobs["Test · ${s}"] = {
                             sh """
@@ -206,7 +206,7 @@ pipeline {
                         }
                     }
 
-                    for (svc in splitEnv('CHANGED_NODE')) {
+                    for (svc in nodeServices()) {
                         def s = svc
                         jobs["Test · ${s}"] = {
                             dir(s) {
@@ -223,7 +223,7 @@ pipeline {
                 always {
                     script {
                         // Publish JUnit results for every changed Java service
-                        for (svc in splitEnv('CHANGED_JAVA')) {
+                        for (svc in javaServices()) {
                             junit(
                                 testResults          : "${svc}/**/surefire-reports/TEST*.xml",
                                 allowEmptyResults    : true,
@@ -241,7 +241,7 @@ pipeline {
                         }
 
                         // Publish Jest/lcov results for Node services
-                        for (svc in splitEnv('CHANGED_NODE')) {
+                        for (svc in nodeServices()) {
                             publishHTML(target: [
                                 allowMissing         : true,
                                 alwaysLinkToLastBuild: false,
@@ -263,7 +263,7 @@ pipeline {
                 script {
                     int threshold = env.MIN_LINE_COVERAGE.toInteger()
 
-                    for (svc in splitEnv('CHANGED_JAVA')) {
+                    for (svc in javaServices()) {
                         def xmlPath = "${svc}/target/site/jacoco/jacoco.xml"
                         if (!fileExists(xmlPath)) {
                             echo "WARN: ${xmlPath} not found — skipping coverage check for ${svc}"
@@ -308,7 +308,7 @@ EOF
                 script {
                     def jobs = [:]
 
-                    for (svc in splitEnv('CHANGED_JAVA')) {
+                    for (svc in javaServices()) {
                         def s = svc
                         jobs["Sonar · ${s}"] = {
                             withSonarQubeEnv('SonarQube') {
@@ -338,7 +338,7 @@ EOF
             when {
                 allOf {
                     expression { currentBuild.result != 'NOT_BUILT' }
-                    expression { splitEnv('CHANGED_JAVA').size() > 0 }
+                    expression { javaServices().size() > 0 }
                 }
             }
             steps {
@@ -355,7 +355,7 @@ EOF
                 script {
                     def jobs = [:]
 
-                    for (svc in splitEnv('CHANGED_JAVA')) {
+                    for (svc in javaServices()) {
                         def s = svc
                         jobs["Snyk · ${s}"] = {
                             snykSecurity(
@@ -369,7 +369,7 @@ EOF
                         }
                     }
 
-                    for (svc in splitEnv('CHANGED_NODE')) {
+                    for (svc in nodeServices()) {
                         def s = svc
                         jobs["Snyk · ${s}"] = {
                             snykSecurity(
@@ -402,7 +402,7 @@ EOF
             steps {
                 script {
                     def jobs = [:]
-                    def allChanged = splitEnv('CHANGED_JAVA') + splitEnv('CHANGED_NODE')
+                    def allChanged = javaServices() + nodeServices()
 
                     for (svc in allChanged) {
                         def s = svc
@@ -465,11 +465,14 @@ def getChangedFiles() {
     return output ? output.split('\n').toList() : []
 }
 
-/**
- * Reads a comma-separated environment variable and returns it as a List<String>.
- * Returns an empty list when the variable is absent or blank.
- */
-def splitEnv(String varName) {
-    def val = env[varName]
+/** Changed Java services stored in env.CHANGED_JAVA */
+def javaServices() {
+    def val = env.CHANGED_JAVA
+    return (val && val.trim()) ? val.split(',').toList() : []
+}
+
+/** Changed Node services stored in env.CHANGED_NODE */
+def nodeServices() {
+    def val = env.CHANGED_NODE
     return (val && val.trim()) ? val.split(',').toList() : []
 }
