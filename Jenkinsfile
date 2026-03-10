@@ -129,7 +129,7 @@ pipeline {
                     script {
                         def mods = env.IMPACTED_MODULES.split(',') as List
                         def pl = mods.join(',')
-                        sh "mvn -B verify -DskipITs -pl ${pl} -am"
+                        sh "mvn -B verify -DskipITs -pl ${pl}"
                     }
                 }
             }
