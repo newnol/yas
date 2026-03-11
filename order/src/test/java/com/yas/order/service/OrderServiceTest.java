@@ -3,8 +3,6 @@ package com.yas.order.service;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
-import static org.mockito.ArgumentMatchers.any;
-import static org.mockito.Mockito.when;
 
 import com.yas.commonlibrary.exception.NotFoundException;
 import com.yas.order.OrderApplication;
@@ -19,12 +17,8 @@ import com.yas.order.repository.OrderItemRepository;
 import com.yas.order.repository.OrderRepository;
 import com.yas.order.viewmodel.order.OrderBriefVm;
 import com.yas.order.viewmodel.order.OrderVm;
-import com.yas.order.viewmodel.orderaddress.OrderAddressPostVm;
-import com.yas.order.viewmodel.order.OrderPostVm;
-import com.yas.order.viewmodel.order.OrderItemPostVm;
-import java.time.ZonedDateTime;
+import java.math.BigDecimal;
 import java.util.List;
-import java.util.Set;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Nested;
@@ -96,13 +90,11 @@ class OrderServiceTest {
         testOrder = Order.builder()
                 .email("test@example.com")
                 .note("Test order note")
-                .tax(10L)
-                .discount(5L)
-                .numberItem(2)
-                .totalPrice(100L)
-                .couponCode("TEST123")
+                .tax(new BigDecimal("10"))
+                .discount(new BigDecimal("5"))
+                .totalPrice(new BigDecimal("100"))
                 .orderStatus(OrderStatus.PENDING)
-                .deliveryFee(5L)
+                .deliveryFee(new BigDecimal("5"))
                 .deliveryStatus(DeliveryStatus.PREPARING)
                 .paymentStatus(PaymentStatus.PENDING)
                 .shippingAddressId(testShippingAddress)
@@ -114,9 +106,8 @@ class OrderServiceTest {
                 .productId(1L)
                 .productName("Test Product")
                 .quantity(2)
-                .productPrice(50L)
+                .productPrice(new BigDecimal("50"))
                 .note("Test item note")
-                .orderId(1L)
                 .build();
     }
 
@@ -139,8 +130,6 @@ class OrderServiceTest {
             assertNotNull(result);
             assertEquals(testOrder.getId(), result.id());
             assertEquals(testOrder.getEmail(), result.email());
-            assertEquals(testOrder.getTax(), result.tax());
-            assertEquals(testOrder.getDiscount(), result.discount());
         }
 
         @Test
@@ -152,23 +141,33 @@ class OrderServiceTest {
     }
 
     @Nested
-    class GetOrderByIdTest {
+    class GetLatestOrdersTest {
         @Test
-        void getOrderById_whenOrderExists_shouldReturnOrder() {
-            testOrder = orderRepository.save(testOrder);
+        void getLatestOrders_whenOrdersExist_shouldReturnOrderList() {
+            orderRepository.save(testOrder);
 
-            OrderBriefVm result = orderService.getOrderById(testOrder.getId());
+            List<OrderBriefVm> result = orderService.getLatestOrders(10);
 
             assertNotNull(result);
-            assertEquals(testOrder.getId(), result.id());
-            assertEquals(testOrder.getEmail(), result.email());
+            assertEquals(1, result.size());
         }
 
         @Test
-        void getOrderById_whenOrderNotFound_shouldThrowNotFoundException() {
-            Long nonExistentId = 99999L;
+        void getLatestOrders_whenNoOrdersExist_shouldReturnEmptyList() {
+            List<OrderBriefVm> result = orderService.getLatestOrders(10);
 
-            assertThrows(NotFoundException.class, () -> orderService.getOrderById(nonExistentId));
+            assertNotNull(result);
+            assertEquals(0, result.size());
+        }
+
+        @Test
+        void getLatestOrders_whenCountIsZero_shouldReturnEmptyList() {
+            orderRepository.save(testOrder);
+
+            List<OrderBriefVm> result = orderService.getLatestOrders(0);
+
+            assertNotNull(result);
+            assertEquals(0, result.size());
         }
     }
 
@@ -182,7 +181,7 @@ class OrderServiceTest {
             orderService.acceptOrder(testOrder.getId());
 
             Order updatedOrder = orderRepository.findById(testOrder.getId()).orElseThrow();
-            assertEquals(OrderStatus.CONFIRMED, updatedOrder.getOrderStatus());
+            assertEquals(OrderStatus.ACCEPTED, updatedOrder.getOrderStatus());
         }
 
         @Test
@@ -194,45 +193,25 @@ class OrderServiceTest {
     }
 
     @Nested
-    class GetOrdersTest {
+    class RejectOrderTest {
         @Test
-        void getOrders_whenOrdersExist_shouldReturnOrderList() {
-            orderRepository.save(testOrder);
-
-            List<OrderBriefVm> result = orderService.getOrders();
-
-            assertNotNull(result);
-            assertEquals(1, result.size());
-        }
-
-        @Test
-        void getOrders_whenNoOrdersExist_shouldReturnEmptyList() {
-            List<OrderBriefVm> result = orderService.getOrders();
-
-            assertNotNull(result);
-            assertEquals(0, result.size());
-        }
-    }
-
-    @Nested
-    class UpdateOrderStatusTest {
-        @Test
-        void updateOrderStatus_whenOrderExists_shouldUpdateStatus() {
+        void rejectOrder_whenOrderExists_shouldUpdateOrderStatus() {
             testOrder.setOrderStatus(OrderStatus.PENDING);
             testOrder = orderRepository.save(testOrder);
 
-            orderService.updateOrderStatus(testOrder.getId(), OrderStatus.CONFIRMED);
+            orderService.rejectOrder(testOrder.getId(), "Out of stock");
 
             Order updatedOrder = orderRepository.findById(testOrder.getId()).orElseThrow();
-            assertEquals(OrderStatus.CONFIRMED, updatedOrder.getOrderStatus());
+            assertEquals(OrderStatus.REJECT, updatedOrder.getOrderStatus());
+            assertEquals("Out of stock", updatedOrder.getRejectReason());
         }
 
         @Test
-        void updateOrderStatus_whenOrderNotFound_shouldThrowNotFoundException() {
+        void rejectOrder_whenOrderNotFound_shouldThrowNotFoundException() {
             Long nonExistentId = 99999L;
 
             assertThrows(NotFoundException.class,
-                    () -> orderService.updateOrderStatus(nonExistentId, OrderStatus.CONFIRMED));
+                    () -> orderService.rejectOrder(nonExistentId, "Test reason"));
         }
     }
 }
